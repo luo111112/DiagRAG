@@ -1,0 +1,24 @@
+milvus:
+  host: ${MILVUS_HOST:-localhost}
+  port: ${MILVUS_PORT:-19530}
+  collection_name: medical_chunks
+  vector_dim: 1536
+
+embedding:
+  model: text-embedding-v1
+  dashscope_api_key: ${DASHSCOPE_API_KEY}
+
+llm:
+  model: "qwen-max"
+  temperature: 0.1
+  max_tokens: 1500
+  dashscope_api_key: ${DASHSCOPE_API_KEY}
+
+retrieval:
+  top_k: 5
+  score_threshold: 0.0
+
+chunking:
+  chunk_size: 500
+  chunk_overlap: 50
+  min_chunk_length: 20

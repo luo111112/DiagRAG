@@ -1,0 +1,10 @@
+{
+  "input_dir": "D:\\PyCharm\\PythonProject\\DiagRAG\\data",
+  "output_file": "D:\\PyCharm\\PythonProject\\DiagRAG\\data\\processed\\chunks.json",
+  "files_processed": 1,
+  "chunks_generated": 3,
+  "avg_chunks_per_file": 3.0,
+  "chunk_size": 500,
+  "chunk_overlap": 50,
+  "min_chunk_length": 20
+}

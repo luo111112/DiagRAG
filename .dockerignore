@@ -1,0 +1,43 @@
+# Git
+.git
+.gitignore
+
+# Virtual environments
+venv
+.venv
+env
+.env
+
+# Python cache
+__pycache__
+*.py[cod]
+*.egg-info
+.eggs
+dist
+build
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# Docker
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# Documentation (optional, reduce context)
+*.md
+!requirements.txt
+
+# Data and logs
+*.pdf
+*.docx
+*.xlsx
+logs
+*.log
+
+# Cursor/CI
+agent-transcripts
+terminals
