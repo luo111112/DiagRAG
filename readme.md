@@ -1,4 +1,4 @@
-# 医智援（DiagRAG）—— 医学诊断检索增强生成系统
+﻿# 医智援（DiagRAG）—— 医学诊断检索增强生成系统
 
 > 基于 Milvus 向量数据库与阿里云 DashScope（通义千问 Qwen）的医学智能问答系统
 
@@ -27,6 +27,7 @@
 |------|------|
 | 医学知识问答 | 基于医学文献进行循证问答 |
 | 混合检索 | 向量语义搜索 + BM25 关键词搜索，RRF 融合 |
+| **智能重排序** | LLM（Qwen）驱动的 CrossEncoder 重排序，提升检索相关性 |
 | 流式输出 | 实时流式 SSE 响应，用户体验友好 |
 | 智能引用 | 答案附带文献来源，可追溯可验证 |
 | 安全提醒 | 急危重症自动提示就医，诊断分寸感强 |
@@ -75,7 +76,10 @@
 │   Step 2: Milvus Client ────► 混合检索 (向量 + BM25 + RRF融合)      │
 │                │                                                    │
 │                ▼                                                    │
-│   Step 3: Prompt Assembly ──► 拼接 RAG 提示词模板                   │
+│   Step 3: LLM Reranker ───────► LLM 语义重排序，过滤噪声             │
+│                │                                                    │
+│                ▼                                                    │
+│   Step 4: Prompt Assembly ──► 拼接 RAG 提示词模板                   │
 │                │                                                    │
 │                ▼                                                    │
 │   Step 4: LLM Client ───────► 调用 Qwen 生成答案                    │
@@ -119,11 +123,11 @@
 │  → 取 top_k=5 最相关文档块                 │
 └──────────────────────────────────────────┘
      │
-     │ 3. 构建 RAG 提示词
+     │ 3. LLM 语义重排序（CrossEncoder 风格）
      ▼
 医智援系统提示词 + [上下文: 检索到的5条文档] + 用户问题
      │
-     │ 4. LLM 生成
+     │ 5. LLM 生成
      ▼
 "根据检索到的医学文献，急性心肌梗死的典型症状包括：
   1. 胸骨后压榨性疼痛...
@@ -488,7 +492,11 @@ retrieval:
   top_k: 5                                  # 检索返回的文档块数量
   score_threshold: 0.0                      # 相似度分数阈值（0=不过滤）
   enable_rerank: false                      # 是否启用重排序
-  hybrid_alpha: 0.5                        # 混合检索权重（0.5=等权重）
+  rerank_top_k: 3                           # 重排序后传给 LLM 的最终文档数
+  rerank_mode: score                       # 评分模式：rank=仅排序 / score=数值评分 / score_with_reason=评分+理由
+  enable_bm25_blend: false                 # 是否启用 BM25 混合重排序
+  rerank_fusion: rrf                       # 融合策略：rrf=倒数排名融合 / linear=线性加权
+  max_docs_per_call: 10                    # 单次 LLM 调用最多处理的文档数
 
 # 文档分块配置
 chunking:
@@ -625,7 +633,7 @@ class DashScopeLLMClient:
 
 - [ ] 支持更多医学文献格式（Word、HTML、医学影像报告）
 - [ ] 接入医学知识图谱，实现多跳推理问答
-- [ ] 实现检索结果重排序（Reranker）
+- [x] 实现检索结果重排序（Reranker）
 - [ ] 增加对话历史管理（Multi-turn RAG）
 - [ ] 支持更多 LLM 后端（Claude、GPT-4）
 - [ ] 增加评估指标（Bleu、Recall、F1、医生评分）

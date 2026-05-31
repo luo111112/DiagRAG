@@ -17,6 +17,21 @@ llm:
 retrieval:
   top_k: 5
   score_threshold: 0.0
+  # 查询预处理配置
+  enable_query_preprocess: false          # 是否启用查询预处理（normalize / standardize / rewrite / expand）
+  # Query 改写（LLM 调用）
+  enable_query_rewrite: false             # 是否启用 LLM 查询改写（生成 1-2 个更清晰的变体）
+  max_rewrite_variants: 2                # 最多生成的改写变体数量
+  # Query 扩展（LLM 调用）
+  enable_query_expand: false             # 是否启用 LLM 查询扩展（生成相关医学术语）
+  max_expand_terms: 4                    # 最多生成的扩展词数量
+  # Reranker 配置
+  enable_rerank: false                    # 是否在检索后启用重排序
+  rerank_top_k: 3                         # 重排序后传给 LLM 的最终文档数（应 <= top_k）
+  rerank_mode: "score"                    # LLM 评分模式：rank=仅排序 / score=数值评分 / score_with_reason=评分+理由
+  enable_bm25_blend: false               # 是否启用 BM25 混合重排序（与 LLM 融合）
+  rerank_fusion: "rrf"                   # 融合策略：rrf=倒数排名融合 / linear=线性加权
+  max_docs_per_call: 10                   # 单次 LLM 调用最多处理的文档数（控制 token 消耗）
 
 chunking:
   chunk_size: 500

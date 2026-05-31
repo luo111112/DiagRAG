@@ -100,3 +100,47 @@ def get_retrieval_config() -> dict:
     if "retrieval" not in config:
         raise ConfigError("Missing required config key: 'retrieval'")
     return config["retrieval"]
+
+
+def get_reranker_config() -> dict:
+    """Return the reranker section of the config.
+
+    Falls back to defaults for keys not explicitly set in config.yml.
+    Raises:
+        ConfigError: If the 'retrieval' key is missing from the config.
+    """
+    retrieval = get_retrieval_config()
+    defaults = {
+        "enable_rerank": False,
+        "rerank_top_k": 3,
+        "rerank_mode": "score",
+        "enable_bm25_blend": False,
+        "rerank_fusion": "rrf",
+        "max_docs_per_call": 10,
+    }
+    result = {**defaults}
+    for key in defaults:
+        if key in retrieval:
+            result[key] = retrieval[key]
+    return result
+
+
+def get_preprocessor_config() -> dict:
+    """Return the query preprocessor section of the config.
+
+    Falls back to defaults for keys not explicitly set in config.yml.
+    """
+    retrieval = get_retrieval_config()
+    defaults = {
+        "enable_rewrite": False,
+        "enable_expand": False,
+        "max_variants": 2,
+        "max_expand_terms": 4,
+    }
+    result = {**defaults}
+    pp = retrieval.get("preprocessor", {})
+    if isinstance(pp, dict):
+        for key in defaults:
+            if key in pp:
+                result[key] = pp[key]
+    return result
