@@ -27,15 +27,15 @@ logger = logging.getLogger(__name__)
 
 
 def _tokenize_chinese(text: str) -> list[str]:
-    """中文分词（简单字符级分词，适用于无 jieba 环境）。
+    """中文分词，基于 jieba 精确分词，小写化。
 
-    按空格和标点分词，小写化，移除空字符串。
-    正式项目建议替换为 jieba 分词以获得更好的中文切分效果。
+    英文词统一转为小写；中文词保留原样（BM25 对英文大小写不敏感）。
+    移除空字符串。
     """
-    import re
+    import jieba
 
-    tokens = re.split(r"[\s，。、！？；：""''【】《》（）\u4e00-\u9fff]+", text)
-    return [t.lower().strip() for t in tokens if t.strip()]
+    tokens = jieba.lcut(text)
+    return [t.lower() for t in tokens if t.strip()]
 
 
 def _compute_idf(corpus: list[str]) -> dict[str, float]:

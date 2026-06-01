@@ -51,12 +51,11 @@ class BM25Reranker:
         self._avgdl: float = 0.0
 
     def _tokenize(self, text: str) -> list[str]:
-        """中文分词（字符级 + 标点分隔，小写化。生产环境建议替换为 jieba）。"""
-        tokens = re.split(
-            r"[\s，。、！？；：""''【】《》（）\u4e00-\u9fff]+",
-            text,
-        )
-        return [t.lower().strip() for t in tokens if t.strip()]
+        """中文分词，基于 jieba 精确分词，小写化。"""
+        import jieba
+
+        tokens = jieba.lcut(text)
+        return [t.lower() for t in tokens if t.strip()]
 
     def fit(self, corpus: list[str]) -> "BM25Reranker":
         """用文档语料库拟合 IDF 参数。
