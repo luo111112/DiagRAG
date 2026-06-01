@@ -37,3 +37,19 @@ chunking:
   chunk_size: 500
   chunk_overlap: 50
   min_chunk_length: 20
+
+# 元数据过滤配置：根据文档元数据字段筛检索结果
+metadata_filter:
+  enabled: false
+  # 过滤模式：
+  #   "whitelist" — 仅保留 metadata 中指定字段值匹配的文档（交集）
+  #   "blacklist" — 排除匹配 blacklist 中任意一项的文档
+  mode: "whitelist"
+  # 白名单规则：key=metadata 字段名，value=允许的值列表（任一匹配即可）
+  # 支持从环境变量引用：使用 ${VAR} 语法
+  whitelist:
+    # source_file: ["急性心肌梗死诊疗指南", "糖尿病防治指南"]
+    # disease_type: ["急性心肌梗死"]
+  # 黑名单规则：key=metadata 字段名，value=排除的值列表
+  blacklist:
+    # source_file: ["测试文档"]

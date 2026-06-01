@@ -1,5 +1,9 @@
 """Retrieval-augmented generation components."""
 
+from src.retrieval.metadata_filter import (
+    MetadataFilter,
+    build_metadata_filter,
+)
 from src.retrieval.query_preprocessor import (
     QueryPreprocessor,
     build_preprocessor,
@@ -16,6 +20,8 @@ __all__ = [
     "LLMRanker",
     "HybridReranker",
     "build_ranker",
+    "MetadataFilter",
+    "build_metadata_filter",
     "QueryPreprocessor",
     "build_preprocessor",
 ]

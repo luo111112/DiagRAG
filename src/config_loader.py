@@ -144,3 +144,28 @@ def get_preprocessor_config() -> dict:
             if key in pp:
                 result[key] = pp[key]
     return result
+
+
+# ---------------------------------------------------------------------------
+# 元数据过滤器配置
+# ---------------------------------------------------------------------------
+
+def get_metadata_filter_config() -> dict:
+    """返回配置文件中 metadata_filter 部分的配置。
+
+    配置中未显式设置的键会回退到默认值。
+    """
+    retrieval = get_retrieval_config()
+    defaults = {
+        "enabled": False,
+        "mode": "whitelist",
+        "whitelist": {},
+        "blacklist": {},
+    }
+    result = {**defaults}
+    mf = retrieval.get("metadata_filter", {})
+    if isinstance(mf, dict):
+        for key in defaults:
+            if key in mf:
+                result[key] = mf[key]
+    return result
