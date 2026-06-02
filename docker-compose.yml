@@ -70,11 +70,105 @@ services:
     environment:
       # Docker 容器内 Milvus 服务名（非 localhost）
       MILVUS_HOST: milvus-standalone
+      # 对话记忆服务配置（容器内服务名）
+      REDIS_HOST: redis
+      MYSQL_HOST: mysql
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     depends_on:
       milvus-standalone:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
     ports:
       - "8000:8000"
+    networks:
+      - milvus
+
+  # ---------------------------------------------------------------------------
+  # 对话记忆基础设施
+  # ---------------------------------------------------------------------------
+
+  redis:
+    container_name: diagrag-redis
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "6379:6379"
+    networks:
+      - milvus
+
+  mysql:
+    container_name: diagrag-mysql
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:-diagrag123}
+      MYSQL_DATABASE: diagrag
+      MYSQL_USER: diagrag
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-diagrag123}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    ports:
+      - "3306:3306"
+    networks:
+      - milvus
+
+  kafka:
+    container_name: diagrag-kafka
+    image: apache/kafka:3.7.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG_DIRS: /opt/kafka/data
+      CLUSTER_ID: ZGtjZTJhMGM2ZjgzNDk1MzBkYzJkMzM0YTQyZTZiOTYK
+    volumes:
+      - kafka_data:/opt/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    ports:
+      - "9092:9092"
+    networks:
+      - milvus
+
+  kafdrop:
+    container_name: diagrag-kafdrop
+    image: obsidiandynamics/kafdrop:4.0.0
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "9000:9000"
     networks:
       - milvus
 
@@ -82,6 +176,9 @@ volumes:
   etcd_data:
   minio_data:
   milvus_data:
+  redis_data:
+  mysql_data:
+  kafka_data:
 
 networks:
   milvus:

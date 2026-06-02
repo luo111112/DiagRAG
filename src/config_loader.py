@@ -169,3 +169,59 @@ def get_metadata_filter_config() -> dict:
             if key in mf:
                 result[key] = mf[key]
     return result
+
+
+# ---------------------------------------------------------------------------
+# 对话历史（长中短期记忆）配置
+# ---------------------------------------------------------------------------
+
+def get_conversation_config() -> dict:
+    """返回配置文件中 conversation 部分的配置。
+
+    配置中未显式设置的键会回退到默认值。
+    """
+    config = load_config()
+    defaults = {
+        "redis": {
+            "host": "localhost",
+            "port": 6379,
+            "db": 0,
+            "password": "",
+        },
+        "mysql": {
+            "host": "localhost",
+            "port": 3306,
+            "user": "root",
+            "password": "",
+            "database": "diagrag",
+            "pool_size": 10,
+            "pool_recycle": 3600,
+        },
+        "kafka": {
+            "bootstrap_servers": "localhost:9092",
+            "topic": "rag-conversation-events",
+            "consumer_group": "rag-conversation-consumer",
+            "acks": "all",
+            "retries": 3,
+        },
+        "redis_cache_turns": 10,
+        "summary_interval_turns": 5,
+        "redis_ttl_days": 7,
+        "mysql_retention_days": 30,
+        "summary_llm_model": "qwen-plus",
+        "summary_llm_temperature": 0.1,
+        "summary_max_tokens": 500,
+    }
+    raw = config.get("conversation", {})
+    return _deep_merge(defaults, raw)
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Deep merge override into base, overriding existing keys."""
+    result = {**base}
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result

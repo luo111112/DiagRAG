@@ -53,3 +53,34 @@ metadata_filter:
   # 黑名单规则：key=metadata 字段名，value=排除的值列表
   blacklist:
     # source_file: ["测试文档"]
+
+# 对话历史（长中短期记忆）配置
+conversation:
+  redis:
+    host: "localhost"
+    port: 6379
+    db: 0
+    password: ""               # 空=无密码，从环境变量覆盖用 ${REDIS_PASSWORD}
+  mysql:
+    host: "localhost"
+    port: 3306
+    user: "root"
+    password: ""              # 从环境变量 ${MYSQL_PASSWORD}
+    database: "diagrag"
+    pool_size: 10
+    pool_recycle: 3600
+  kafka:
+    bootstrap_servers: "localhost:9092"
+    topic: "rag-conversation-events"
+    consumer_group: "rag-conversation-consumer"
+    acks: "all"
+    retries: 3
+  # 记忆策略参数
+  redis_cache_turns: 10           # Redis 缓存最近多少轮（10轮=20条消息）
+  summary_interval_turns: 5       # 每满多少轮触发一次摘要生成
+  redis_ttl_days: 7               # Redis 数据过期天数
+  mysql_retention_days: 30        # MySQL 数据保留天数（合规）
+  # LLM 摘要模型（用 qwen-plus 降成本，不占用 qwen-max 配额）
+  summary_llm_model: "qwen-plus"
+  summary_llm_temperature: 0.1
+  summary_max_tokens: 500
