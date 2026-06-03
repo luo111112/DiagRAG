@@ -307,12 +307,11 @@ def save_message(message: Message) -> bool:
             cursor.execute(
                 """
                 INSERT INTO messages
-                    (id, session_id, message_order, role, content, metadata, created_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    (session_id, message_order, role, content, metadata, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 ON DUPLICATE KEY UPDATE content = content
                 """,
                 (
-                    message.id,
                     message.session_id,
                     message.message_order,
                     message.role.value,

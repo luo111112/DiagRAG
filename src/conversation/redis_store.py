@@ -78,13 +78,14 @@ def write_message(message: Message) -> int:
     client = get_redis_client()
     pipe = client.pipeline(transaction=True)
 
+    # Serialize message BEFORE assigning message_order from pipeline
+    # (pipeline commands return lazy chain objects, not real values)
+    msg_json = message.to_json_str()
+
     # 1. Atomically generate message_order
     counter_key = _MESSAGE_COUNTER_KEY.format(session_id=message.session_id)
-    message_order = pipe.incr(counter_key)
-    message.message_order = message_order
+    pipe.incr(counter_key)
 
-    # 2. Serialize and append message
-    msg_json = message.to_json_str()
     msg_list_key = _MESSAGES_LIST_KEY.format(session_id=message.session_id)
     pipe.rpush(msg_list_key, msg_json)
 
@@ -95,7 +96,6 @@ def write_message(message: Message) -> int:
     session_key = _SESSION_HASH_KEY.format(session_id=message.session_id)
     pipe.hset(session_key, mapping={
         "updated_at": datetime.now().isoformat(),
-        "last_message_order": message_order,
         "user_id": message.session_id.split("-")[0],  # placeholder; caller should set properly
         "status": "active",
     })
@@ -110,11 +110,19 @@ def write_message(message: Message) -> int:
     pipe.zadd(user_sessions_key, {message.session_id: datetime.now().timestamp()})
 
     results = pipe.execute()
+    message_order = int(results[0])  # INCR result is at index 0
+
+    # Update message_order AFTER execute() — now it's a real integer
+    message.message_order = message_order
+
+    # Update session hash with the real message_order
+    get_redis_client().hset(session_key, "last_message_order", message_order)
+
     logger.debug(
         "Redis write_message: session=%s, order=%s, ttl=%ds",
         message.session_id, message_order, ttl_seconds,
     )
-    return int(results[0])  # return the message_order
+    return message_order
 
 
 def update_session_meta(

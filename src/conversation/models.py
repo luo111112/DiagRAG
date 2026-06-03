@@ -63,6 +63,11 @@ class Message:
     metadata: dict[str, Any] | None = None
     created_at: datetime = field(default_factory=datetime.now)
 
+    def __post_init__(self) -> None:
+        """Sanitize metadata at construction time to drop non-JSON-serializable values."""
+        if self.metadata is not None:
+            self.metadata = self._serialize_metadata(self.metadata)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
@@ -70,9 +75,27 @@ class Message:
             "message_order": self.message_order,
             "role": self.role.value,
             "content": self.content,
-            "metadata": self.metadata or {},
+            "metadata": self._serialize_metadata(self.metadata),
             "created_at": self.created_at.isoformat(),
         }
+
+    @staticmethod
+    def _serialize_metadata(meta: dict[str, Any] | None) -> dict[str, Any]:
+        """Safely serialize metadata, dropping non-JSON-serializable values."""
+        if meta is None:
+            return {}
+        result: dict[str, Any] = {}
+        for k, v in meta.items():
+            try:
+                import json
+                json.dumps(v)
+                result[k] = v
+            except Exception:
+                try:
+                    result[k] = repr(v)
+                except Exception:
+                    pass
+        return result
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Message":
@@ -98,7 +121,10 @@ class Message:
     def to_json_str(self) -> str:
         import json
 
-        return json.dumps(self.to_dict(), ensure_ascii=False)
+        def _safe_default(obj: Any) -> str:
+            return repr(obj)
+
+        return json.dumps(self.to_dict(), ensure_ascii=False, default=_safe_default)
 
     @classmethod
     def from_json_str(cls, s: str) -> "Message":

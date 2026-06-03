@@ -379,6 +379,7 @@ def chat_endpoint(body: ChatRequest) -> ChatResponse:
 
         # -- Step 3: retrieval --
         top_k = body.top_k if body.top_k else rag_chain.top_k
+        chunks: list[dict[str, Any]] = []
         try:
             query_vector = rag_chain.embedding_client.embed_text(body.question)
             chunks = rag_chain.milvus_client.search(query_vector=query_vector, top_k=top_k)
@@ -569,7 +570,6 @@ def chat_stream_endpoint(body: ChatRequest):
         answer_holder: list[str] = []
 
         def stream_with_postproc():
-            nonlocal answer_text_for_postproc
             answer_parts: list[str] = []
 
             try:

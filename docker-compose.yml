@@ -68,18 +68,20 @@ services:
     env_file:
       - .env
     environment:
-      # Docker 容器内 Milvus 服务名（非 localhost）
+      # Milvus（容器内网络）
       MILVUS_HOST: milvus-standalone
-      # 对话记忆服务配置（容器内服务名）
+      MILVUS_PORT: 19530
+      # MySQL（连接宿主机，使用 host.docker.internal）
+      MYSQL_HOST: host.docker.internal
+      MYSQL_PORT: 3306
+      # Redis、Kafka（容器内网络）
       REDIS_HOST: redis
-      MYSQL_HOST: mysql
+      REDIS_PORT: 6379
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     depends_on:
       milvus-standalone:
         condition: service_healthy
       redis:
-        condition: service_healthy
-      mysql:
         condition: service_healthy
       kafka:
         condition: service_healthy
@@ -108,48 +110,26 @@ services:
     networks:
       - milvus
 
-  mysql:
-    container_name: diagrag-mysql
-    image: mysql:8.0
-    environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:-diagrag123}
-      MYSQL_DATABASE: diagrag
-      MYSQL_USER: diagrag
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-diagrag123}
-    volumes:
-      - mysql_data:/var/lib/mysql
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 30s
-    ports:
-      - "3306:3306"
-    networks:
-      - milvus
-
   kafka:
     container_name: diagrag-kafka
-    image: apache/kafka:3.7.0
+    image: confluentinc/cp-kafka:7.7.0
+    depends_on:
+      zookeeper:
+        condition: service_healthy
     environment:
-      KAFKA_NODE_ID: 1
-      KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
-      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
-      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-      KAFKA_LOG_DIRS: /opt/kafka/data
-      CLUSTER_ID: ZGtjZTJhMGM2ZjgzNDk1MzBkYzJkMzM0YTQyZTZiOTYK
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
     volumes:
-      - kafka_data:/opt/kafka/data
+      - kafka_data:/var/lib/kafka/data
     healthcheck:
-      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      test: ["CMD-SHELL", "/usr/bin/kafka-broker-api-versions --bootstrap-server localhost:9092"]
       interval: 15s
       timeout: 10s
       retries: 10
@@ -159,11 +139,25 @@ services:
     networks:
       - milvus
 
+  zookeeper:
+    container_name: diagrag-zookeeper
+    image: confluentinc/cp-zookeeper:7.7.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 2181 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - milvus
+
   kafdrop:
     container_name: diagrag-kafdrop
     image: obsidiandynamics/kafdrop:4.0.0
     environment:
-      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_BROKERCONNECT: kafka:9092
     depends_on:
       kafka:
         condition: service_healthy
@@ -177,7 +171,6 @@ volumes:
   minio_data:
   milvus_data:
   redis_data:
-  mysql_data:
   kafka_data:
 
 networks:

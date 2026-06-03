@@ -57,20 +57,20 @@ metadata_filter:
 # 对话历史（长中短期记忆）配置
 conversation:
   redis:
-    host: "localhost"
-    port: 6379
+    host: ${REDIS_HOST:-localhost}
+    port: ${REDIS_PORT:-6379}
     db: 0
-    password: ""               # 空=无密码，从环境变量覆盖用 ${REDIS_PASSWORD}
+    password: ${REDIS_PASSWORD:-}
   mysql:
-    host: "localhost"
-    port: 3306
-    user: "root"
-    password: ""              # 从环境变量 ${MYSQL_PASSWORD}
-    database: "diagrag"
+    host: ${MYSQL_HOST:-localhost}
+    port: ${MYSQL_PORT:-3306}
+    user: ${MYSQL_USER:-root}
+    password: ${MYSQL_PASSWORD:-diagrag123}
+    database: ${MYSQL_DATABASE:-diagrag}
     pool_size: 10
     pool_recycle: 3600
   kafka:
-    bootstrap_servers: "localhost:9092"
+    bootstrap_servers: ${KAFKA_BOOTSTRAP_SERVERS:-localhost:9092}
     topic: "rag-conversation-events"
     consumer_group: "rag-conversation-consumer"
     acks: "all"
