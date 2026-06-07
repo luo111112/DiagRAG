@@ -8,12 +8,14 @@
     5. 将文档块文本拼接为上下文字符串。
     6. 用上下文 + 问题填充 RAG 提示词模板。
     7. 请求 LLM 生成有据可查的回答。
-    8. 返回回答及引用信息和原始检索结果。
+    8. （可选）将结果写入语义缓存。
+    9. 返回回答及引用信息和原始检索结果。
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Generator
 from typing import TYPE_CHECKING, Any
 
 from src.config_loader import (
@@ -21,6 +23,7 @@ from src.config_loader import (
     get_preprocessor_config,
     get_reranker_config,
     get_retrieval_config,
+    get_semantic_cache_config,
     load_config,
 )
 from src.generation.prompts import MEDICAL_SYSTEM_PROMPT, RAG_PROMPT_TEMPLATE
@@ -32,6 +35,7 @@ if TYPE_CHECKING:
     from src.retrieval.metadata_filter import MetadataFilter
     from src.retrieval.query_preprocessor import QueryPreprocessor
     from src.retrieval.rerank import LLMRanker
+    from src.vectorstore.semantic_cache import SemanticCache
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +59,7 @@ class RAGChain:
         reranker: "LLMRanker | None" = None,
         preprocessor: "QueryPreprocessor | None" = None,
         metadata_filter: "MetadataFilter | None" = None,
+        semantic_cache: "SemanticCache | None" = None,
     ) -> None:
         """初始化 RAG chain。
 
@@ -78,6 +83,11 @@ class RAGChain:
                              提供时，检索到的文档块会在传给 LLM 前
                              根据其存储的元数据字段进行过滤。
                              若为 None，则自动从配置构造。
+            semantic_cache: 语义缓存实例（SemanticCache）。
+                            提供时，answer() 会在调用 LLM 前先查询缓存，
+                            命中则直接返回；LLM 生成完成后会将结果写入缓存。
+                            若为 None，则自动从配置构造（需 embedding_client
+                            和 milvus_client 均已注入）。
         """
         self.embedding_client = embedding_client
         self.milvus_client = milvus_client
@@ -161,55 +171,115 @@ class RAGChain:
         else:
             logger.info("RAGChain metadata_filter disabled (enabled=false).")
 
+        # ------------------------------------------------------------------
+        # 语义缓存：优先使用注入的实例，否则从配置自动构造。
+        #
+        # 提供两级缓存（Redis 精确键 + Milvus ANN 向量），在调用 LLM 前
+        # 拦截命中，命中后直接返回缓存结果；LLM 生成完成后将结果写入缓存。
+        # ------------------------------------------------------------------
+        self.semantic_cache: "SemanticCache | None" = None
+        cache_cfg = get_semantic_cache_config()
+        if semantic_cache is not None:
+            self.semantic_cache = semantic_cache
+            logger.info("RAGChain using provided SemanticCache instance.")
+        elif cache_cfg.get("enabled", False):
+            from src.vectorstore.semantic_cache import SemanticCache
+            self.semantic_cache = SemanticCache(
+                embedding_client=embedding_client,
+                milvus_client=milvus_client,
+            )
+            logger.info("RAGChain auto-constructed SemanticCache.")
+        else:
+            logger.info("RAGChain SemanticCache disabled (enabled=false).")
+
         logger.info(
             "RAGChain initialized: top_k=%d, system_prompt_len=%d, "
-            "reranker=%s, preprocessor=%s, metadata_filter=%s",
+            "reranker=%s, preprocessor=%s, metadata_filter=%s, semantic_cache=%s",
             self.top_k,
             len(self.system_prompt),
             type(self.reranker).__name__ if self.reranker else "None",
             type(self.preprocessor).__name__ if self.preprocessor else "None",
             type(self.metadata_filter).__name__ if self.metadata_filter else "None",
+            type(self.semantic_cache).__name__ if self.semantic_cache else "None",
         )
 
-    def answer(self, question: str) -> dict[str, Any]:
+    def answer(
+        self,
+        question: str,
+        session_id: str | None = None,
+        session_summary: str = "",
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
         """使用检索增强生成回答医学问题。
 
         完整处理流程：
 
-        1. 预处理查询（归一化 / 改写 / 扩展）—— 可选。
-        2. 将（预处理后的）问题嵌入为向量。
-        3. 从 Milvus 检索 top-k 最相关文档块。
-        4. 对文档块进行重排序（语义 / 关键词相关性）—— 可选。
-        5. 根据元数据字段过滤文档块（白名单 / 黑名单）—— 可选。
-        6. 用剩余文档块构建上下文字符串。
-        7. 请求 LLM 基于上下文生成回答。
+        1. （可选）查询语义缓存（Redis 精确 + Milvus ANN）—— 命中直接返回。
+        2. 预处理查询（归一化 / 改写 / 扩展）—— 可选。
+        3. 将（预处理后的）问题嵌入为向量。
+        4. 从 Milvus 检索 top-k 最相关文档块。
+        5. 对文档块进行重排序（语义 / 关键词相关性）—— 可选。
+        6. 根据元数据字段过滤文档块（白名单 / 黑名单）—— 可选。
+        7. 用剩余文档块构建上下文字符串。
+        8. 请求 LLM 基于上下文生成回答。
+        9. （可选）将 LLM 生成结果写入语义缓存。
 
         Args:
             question: 用户的临床 / 医学问题。
+            session_id: 当前会话 ID，用于语义缓存上下文关联（多轮场景）。
+            session_summary: 当前会话摘要，用于上下文指纹 Jaccard 比对。
+            user_id: 用户 ID（user scope 语义缓存键构建用）。
 
         Returns:
             包含以下键的字典：
-            - ``answer`` (str): LLM 生成的回答。
-            - ``sources`` (list[dict]): 引用列表，每项包含 ``text``、``metadata``、``score``。
-            - ``retrieved_chunks`` (list[dict] | None): Milvus 原始命中结果，
-              检索无结果时为 None。
+            - ``answer`` (str): LLM 生成的回答（命中缓存时为缓存值）。
+            - ``sources`` (list[dict]): 引用列表。
+            - ``retrieved_chunks`` (list[dict] | None): Milvus 原始命中结果。
             - ``context`` (str): 喂给 LLM 的上下文字符串。
             - ``reranked`` (bool): 是否启用了重排序。
-            - ``reranked_chunks`` (list[dict] | None): 重排序后的文档块列表，
-              仅在 reranker 激活时存在。
-            - ``filtered`` (bool): metadata_filter 是否激活并对检索（或重排后）的文档块列表进行了过滤。
-            - ``filtered_chunks`` (list[dict] | None): 通过元数据过滤后的文档块列表，
-              仅在 metadata_filter 激活时存在。
-              注意：当过滤后文档块为零时，会返回空回答而非调用 LLM。
+            - ``reranked_chunks`` (list[dict] | None): 重排序后的文档块列表。
+            - ``filtered`` (bool): metadata_filter 是否激活。
+            - ``filtered_chunks`` (list[dict] | None): 元数据过滤后的文档块列表。
             - ``preprocessed`` (bool): 是否启用了查询预处理。
-            - ``preprocess_result`` (dict | None): 完整的预处理诊断信息，
-              仅在 preprocessor 激活时存在。
+            - ``preprocess_result`` (dict | None): 预处理诊断信息。
+            - ``cache_hit`` (bool): 是否命中语义缓存。
+            - ``cache_hit_from`` (str | None): 命中来源，``"redis_exact"`` 或 ``"milvus_semantic"``。
 
         Raises:
             RAGChainError: If embedding, retrieval, or generation fails.
         """
         # ------------------------------------------------------------------
-        # Step 0 – 预处理查询（归一化 / 纠错 / 改写 / 扩展）
+        # Step 0 – 语义缓存查询（一级 Redis 精确 + 二级 Milvus ANN）
+        # ------------------------------------------------------------------
+        if self.semantic_cache is not None and self.semantic_cache.is_enabled():
+            cache_hit = self.semantic_cache.get_or_set(
+                question=question,
+                session_id=session_id,
+                session_summary=session_summary,
+                user_id=user_id,
+            )
+            if cache_hit is not None:
+                logger.info(
+                    "SemanticCache HIT (%s) for question: %s",
+                    cache_hit.hit_from, question[:60],
+                )
+                return {
+                    "answer": cache_hit.answer_text,
+                    "sources": cache_hit.sources,
+                    "retrieved_chunks": None,
+                    "context": "",
+                    "reranked": False,
+                    "reranked_chunks": None,
+                    "filtered": False,
+                    "filtered_chunks": None,
+                    "preprocessed": False,
+                    "preprocess_result": None,
+                    "cache_hit": True,
+                    "cache_hit_from": cache_hit.hit_from,
+                }
+
+        # ------------------------------------------------------------------
+        # Step 1 – 预处理查询（归一化 / 纠错 / 改写 / 扩展）
         # ------------------------------------------------------------------
         preprocessed = False
         preprocess_result: dict[str, Any] | None = None
@@ -231,7 +301,7 @@ class RAGChain:
                 preprocess_result = None
 
         # ------------------------------------------------------------------
-        # Step 1 – 将（预处理后的）问题嵌入为向量
+        # Step 2 – 将（预处理后的）问题嵌入为向量
         # ------------------------------------------------------------------
         try:
             query_vector = self.embedding_client.embed_text(effective_question)
@@ -240,7 +310,7 @@ class RAGChain:
             raise RAGChainError(f"Embedding step failed: {e}") from e
 
         # ------------------------------------------------------------------
-        # Step 2 – 从 Milvus 检索 top-k 最相关文档块
+        # Step 3 – 从 Milvus 检索 top-k 最相关文档块
         # ------------------------------------------------------------------
         try:
             chunks = self.milvus_client.search(
@@ -252,7 +322,7 @@ class RAGChain:
             raise RAGChainError(f"Retrieval step failed: {e}") from e
 
         # ------------------------------------------------------------------
-        # Step 2.5 – 对检索结果进行重排序（可选）
+        # Step 4 – 对检索结果进行重排序（可选）
         # ------------------------------------------------------------------
         reranked_chunks: list[dict[str, Any]] | None = None
         reranked = False
@@ -279,7 +349,7 @@ class RAGChain:
                 logger.warning("Re-ranking failed, falling back to raw retrieval: %s", e)
 
         # ------------------------------------------------------------------
-        # Step 2.6 – 根据元数据字段过滤文档块（可选）
+        # Step 5 – 根据元数据字段过滤文档块（可选）
         # ------------------------------------------------------------------
         filtered_chunks: list[dict[str, Any]] | None = None
         filtered = False
@@ -323,10 +393,14 @@ class RAGChain:
                 "reranked_chunks": reranked_chunks,
                 "filtered": filtered,
                 "filtered_chunks": filtered_chunks,
+                "preprocessed": preprocessed,
+                "preprocess_result": preprocess_result,
+                "cache_hit": False,
+                "cache_hit_from": None,
             }
 
         # ------------------------------------------------------------------
-        # Step 4 – 用上下文 + 问题填充用户提示词模板
+        # Step 6 – 用上下文 + 问题填充用户提示词模板
         # ------------------------------------------------------------------
         user_prompt = RAG_PROMPT_TEMPLATE.format(
             context=context,
@@ -334,7 +408,7 @@ class RAGChain:
         )
 
         # ------------------------------------------------------------------
-        # Step 5 – 请求 LLM 生成回答
+        # Step 7 – 请求 LLM 生成回答
         # ------------------------------------------------------------------
         try:
             answer_text = self.llm_client.generate(
@@ -346,7 +420,7 @@ class RAGChain:
             raise RAGChainError(f"Generation step failed: {e}") from e
 
         # ------------------------------------------------------------------
-        # Step 6 – 从文档块元数据中提取引用信息
+        # Step 8 – 从文档块元数据中提取引用信息
         # ------------------------------------------------------------------
         sources: list[dict[str, Any]] = []
         for chunk in chunks:
@@ -356,6 +430,20 @@ class RAGChain:
                 "metadata": meta,
                 "score": chunk.get("score"),
             })
+
+        # ------------------------------------------------------------------
+        # Step 9 – 将结果写入语义缓存
+        # ------------------------------------------------------------------
+        if self.semantic_cache is not None and self.semantic_cache.is_enabled():
+            self.semantic_cache.write(
+                question=effective_question,
+                answer_text=answer_text,
+                sources=sources,
+                query_vector=query_vector,
+                session_id=session_id,
+                session_summary=session_summary,
+                user_id=user_id,
+            )
 
         return {
             "answer": answer_text,
@@ -368,20 +456,32 @@ class RAGChain:
             "filtered_chunks": filtered_chunks,
             "preprocessed": preprocessed,
             "preprocess_result": preprocess_result,
+            "cache_hit": False,
+            "cache_hit_from": None,
         }
 
-    def stream_answer(self, question: str) -> tuple[Generator[str, None, None], list[dict[str, Any]]]:
+    def stream_answer(
+        self,
+        question: str,
+        session_id: str | None = None,
+        session_summary: str = "",
+        user_id: str | None = None,
+    ) -> tuple[Generator[str, None, None], list[dict[str, Any]]]:
         """流式返回 LLM 回答，同时返回检索来源。
 
-        流式管线与 ``answer()`` 完全对称（预处理 → 嵌入 → 检索 → 重排 → 元数据过滤 →
-        上下文构建 → LLM 生成）。当 ``metadata_filter`` 激活时，来源列表会经过元数据过滤。
+        流式管线与 ``answer()`` 完全对称（语义缓存查询 → 预处理 → 嵌入 → 检索 →
+        重排 → 元数据过滤 → 上下文构建 → LLM 生成 → 缓存写入）。
+        当 ``metadata_filter`` 激活时，来源列表会经过元数据过滤。
+        语义缓存的写入也在流式完成后执行。
 
         Args:
             question: 用户的临床 / 医学问题。
+            session_id: 当前会话 ID（语义缓存上下文关联用）。
+            session_summary: 当前会话摘要（用于上下文指纹 Jaccard 比对）。
+            user_id: 用户 ID（user scope 语义缓存键构建用）。
 
         Returns:
-            (token_generator, sources_list) 元组。当 ``metadata_filter`` 激活时，
-            sources 可能已被元数据过滤。
+            (token_generator, sources_list) 元组。
 
         Raises:
             RAGChainError: If embedding or retrieval fails.

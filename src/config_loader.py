@@ -225,3 +225,36 @@ def _deep_merge(base: dict, override: dict) -> dict:
         else:
             result[key] = value
     return result
+
+
+# ---------------------------------------------------------------------------
+# 语义缓存（Semantic Cache）配置
+# ---------------------------------------------------------------------------
+
+def get_semantic_cache_config() -> dict:
+    """返回配置文件中 semantic_cache 部分的配置。
+
+    配置中未显式设置的键会回退到默认值。
+    """
+    config = load_config()
+    defaults = {
+        "enabled": False,
+        "collection_name": "query_cache",
+        "similarity_threshold": 0.93,
+        "context_threshold": 0.50,
+        "ttl_days": 7,
+        "max_entries": 10000,
+        "cache_key_scope": "session",   # session | user | question
+        "redis_exact_ttl_seconds": 3600,
+        "enable_exact_match": True,
+        "search_top_k": 3,
+        "min_answer_length": 20,
+        "min_sources_count": 0,
+    }
+    raw = config.get("semantic_cache", {})
+    return _deep_merge(defaults, raw)
+
+
+def is_semantic_cache_enabled() -> bool:
+    """语义缓存总开关。返回配置中 enabled 的值，默认为 False。"""
+    return get_semantic_cache_config().get("enabled", False)

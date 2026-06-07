@@ -9,6 +9,10 @@ from datetime import datetime, timedelta
 from kafka import KafkaProducer
 from kafka.errors import KafkaError
 
+# NoBrokersAvailable is raised by kafka-python at import or instantiation time,
+# not always wrapped in KafkaError — catch it explicitly.
+from kafka.errors import NoBrokersAvailable
+
 from src.config_loader import get_conversation_config
 from src.conversation.models import (
     ConversationEvent,
@@ -37,25 +41,29 @@ def _calc_next_retry(retry_count: int) -> datetime:
     return datetime.now() + timedelta(seconds=interval)
 
 
-def get_producer() -> KafkaProducer:
+def get_producer() -> KafkaProducer | None:
     """Return the global KafkaProducer, creating it on first call.
 
-    Configured with idempotence=True and acks='all' for exactly-once semantics.
+    Returns None if Kafka is unavailable (no exception raised).
     """
     global _producer
     if _producer is None:
         cfg = get_conversation_config()
         kafka_cfg = cfg["kafka"]
-        _producer = KafkaProducer(
-            bootstrap_servers=kafka_cfg.get("bootstrap_servers", "localhost:9092"),
-            acks=kafka_cfg.get("acks", "all"),
-            retries=int(kafka_cfg.get("retries", 3)),
-            enable_idempotence=True,
-            key_serializer=lambda k: k.encode() if k else None,
-            value_serializer=lambda v: json.dumps(v, ensure_ascii=False).encode("utf-8"),
-            max_block_ms=5000,
-        )
-        logger.info("KafkaProducer created: %s", kafka_cfg.get("bootstrap_servers"))
+        try:
+            _producer = KafkaProducer(
+                bootstrap_servers=kafka_cfg.get("bootstrap_servers", "localhost:9092"),
+                acks=kafka_cfg.get("acks", "all"),
+                retries=int(kafka_cfg.get("retries", 3)),
+                enable_idempotence=True,
+                key_serializer=lambda k: k.encode() if k else None,
+                value_serializer=lambda v: json.dumps(v, ensure_ascii=False).encode("utf-8"),
+                max_block_ms=5000,
+            )
+            logger.info("KafkaProducer created: %s", kafka_cfg.get("bootstrap_servers"))
+        except NoBrokersAvailable as e:
+            logger.warning("Kafka broker unavailable: %s. Events will be written to MySQL retry queue.", e)
+            return None
     return _producer
 
 
@@ -74,6 +82,10 @@ def _send_event(event: ConversationEvent) -> bool:
     Returns True if sent successfully, False if written to the retry queue.
     """
     producer = get_producer()
+    if producer is None:
+        # Kafka unavailable — write directly to retry queue without logging again
+        _write_fallback(event)
+        return False
     topic = _get_topic()
     try:
         future = producer.send(
@@ -87,7 +99,7 @@ def _send_event(event: ConversationEvent) -> bool:
             event.event_id, event.event_type.value, event.session_id,
         )
         return True
-    except KafkaError as e:
+    except (KafkaError, NoBrokersAvailable) as e:
         logger.warning(
             "Kafka send failed for event %s (%s): %s. Writing to MySQL retry queue.",
             event.event_id, event.event_type.value, e,

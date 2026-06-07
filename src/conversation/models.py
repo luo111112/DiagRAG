@@ -329,3 +329,86 @@ def build_session_close_event(session_id: str, total_turns: int, final_summary_g
             "final_summary_generated": final_summary_generated,
         },
     )
+
+
+# =============================================================================
+# Semantic Cache models
+# =============================================================================
+
+
+@dataclass
+class QueryCacheRecord:
+    """语义缓存的一条记录，存入 Milvus query_cache Collection。"""
+
+    id: int | None               # Milvus 自增主键
+    query_text: str               # 归一化后的原始问题文本
+    query_vector: list[float]     # 1536维稠密向量
+    answer_text: str              # LLM 生成的完整回答
+    sources_json: str            # 来源列表 JSON 字符串
+    session_id: str              # 写入时的会话ID（单轮为 "_single"）
+    summary_hash: str            # 写入时会话摘要的 SHA256 前8位
+    summary_text: str            # 写入时会话摘要原文（用于 Jaccard 比对）
+    hit_count: int = 0           # 累计命中次数
+    created_at: datetime = field(default_factory=datetime.now)
+    last_hit_at: datetime = field(default_factory=datetime.now)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "query_text": self.query_text,
+            "query_vector": self.query_vector,
+            "answer_text": self.answer_text,
+            "sources_json": self.sources_json,
+            "session_id": self.session_id,
+            "summary_hash": self.summary_hash,
+            "summary_text": self.summary_text,
+            "hit_count": self.hit_count,
+            "created_at": self.created_at.isoformat(),
+            "last_hit_at": self.last_hit_at.isoformat(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "QueryCacheRecord":
+        return cls(
+            id=data.get("id"),
+            query_text=data["query_text"],
+            query_vector=data["query_vector"],
+            answer_text=data["answer_text"],
+            sources_json=data["sources_json"],
+            session_id=data.get("session_id", ""),
+            summary_hash=data.get("summary_hash", ""),
+            summary_text=data.get("summary_text", ""),
+            hit_count=int(data.get("hit_count", 0)),
+            created_at=_parse_datetime(data.get("created_at")),
+            last_hit_at=_parse_datetime(data.get("last_hit_at")),
+        )
+
+
+def _parse_datetime(value: Any) -> datetime:
+    """Parse a datetime from string or return now()."""
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return datetime.now()
+    return datetime.now()
+
+
+@dataclass
+class CacheHit:
+    """缓存命中结果。"""
+
+    answer_text: str
+    sources: list[dict]
+    cache_entry_id: int
+    hit_from: str  # "redis_exact" | "milvus_semantic"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "answer_text": self.answer_text,
+            "sources": self.sources,
+            "cache_entry_id": self.cache_entry_id,
+            "hit_from": self.hit_from,
+        }

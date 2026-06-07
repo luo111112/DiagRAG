@@ -93,19 +93,19 @@ RAG_PROMPT_TEMPLATE: str = """【医学知识片段】
 {
   "analysis": "string,  第一步的症状分析结果",
   "differential_diagnosis": [
-    {
+    {{
       "diagnosis": "string,  可能的诊断名称",
       "supporting": "string,  支持点",
       "against": "string  不支持点"
-    }
+    }}
   ],
   "suggested_exams": ["string,  建议的检查项目"],
   "preliminary_advice": "string,  初步处置建议",
   "references": [
-    {
+    {{
       "source": "string,  文档名称",
       "relevance": "number,  相关度评分（0-1）"
-    }
+    }}
   ],
   "safety_alert": "string | null,  若涉及急危重症则显示安全提示，否则为 null"
 }

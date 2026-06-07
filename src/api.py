@@ -30,8 +30,26 @@ from src.embedding_client import DashScopeEmbeddingClient
 from src.llm_client import DashScopeLLMClient
 from src.milvus_client import MilvusClient
 from src.rag_chain import RAGChain, RAGChainError
+from src.conversation.kafka_producer import (
+    send_message_event,
+    send_summary_event,
+    send_session_close_event,
+)
+from kafka.errors import NoBrokersAvailable
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_kafka_send(fn, *args, **kwargs):
+    """Call a Kafka producer function, swallowing NoBrokersAvailable.
+
+    Kafka is an optional async pipeline — it must never crash the API.
+    """
+    try:
+        return fn(*args, **kwargs)
+    except NoBrokersAvailable as e:
+        logger.warning("/chat: Kafka unavailable, skipping event: %s", e)
+        return False
 
 
 class MilvusConnectionError(Exception):
@@ -115,6 +133,8 @@ class AskResponse(BaseModel):
     answer: str
     sources: list[SourceItem]
     session_id: str | None = None
+    cache_hit: bool = False
+    cache_hit_from: str | None = None
 
 
 class CreateSessionRequest(BaseModel):
@@ -146,6 +166,8 @@ class SendMessageResponse(BaseModel):
     sources: list[SourceItem]
     session_id: str
     message_order: int
+    cache_hit: bool = False
+    cache_hit_from: str | None = None
 
 
 class HistoryResponse(BaseModel):
@@ -166,11 +188,56 @@ class ChatResponse(BaseModel):
     sources: list[SourceItem]
     session_id: str
     message_order: int
+    cache_hit: bool = False
+    cache_hit_from: str | None = None
+
+
+class CacheStatsResponse(BaseModel):
+    total_requests: int
+    cache_hits: int
+    redis_hits: int
+    milvus_hits: int
+    context_filtered: int
+    writes: int
+    evictions: int
+    last_eviction_at: str
+    last_reset_at: str
+    hit_rate: float
+    cache_size: int
+    enabled: bool
+
+
+class CacheEvictRequest(BaseModel):
+    n: int = Field(default=100, ge=1, le=10000)
+
+
+class CacheEvictResponse(BaseModel):
+    evicted_ids: list[int]
+    evicted_count: int
+
+
+class CacheClearResponse(BaseModel):
+    deleted_count: int
 
 
 def _sse_format(event: str, data: Any) -> str:
     json_data = json.dumps(jsonable_encoder(data), ensure_ascii=False)
     return f"event: {event}\ndata: {json_data}\n\n"
+
+
+def _get_semantic_cache():
+    if rag_chain is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="RAG chain not initialised.",
+        )
+    semantic_cache = getattr(rag_chain, "semantic_cache", None)
+    if semantic_cache is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Semantic cache is not configured.",
+        )
+    return semantic_cache
 
 
 # =============================================================================
@@ -259,7 +326,7 @@ def ask_endpoint(body: AskRequest) -> AskResponse:
     if rag_chain is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="RAG chain not initialised.")
     try:
-        result = rag_chain.answer(body.question)
+        result = rag_chain.answer(body.question, session_id=None)
     except RAGChainError as exc:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"RAG pipeline error: {exc}") from exc
     except Exception as exc:
@@ -269,7 +336,13 @@ def ask_endpoint(body: AskRequest) -> AskResponse:
         SourceItem(text=src.get("text", "")[:300], metadata=src.get("metadata", {}), score=src.get("score"))
         for src in result.get("sources", [])
     ]
-    return AskResponse(answer=result["answer"], sources=sources, session_id=body.session_id)
+    return AskResponse(
+        answer=result["answer"],
+        sources=sources,
+        session_id=body.session_id,
+        cache_hit=result.get("cache_hit", False),
+        cache_hit_from=result.get("cache_hit_from"),
+    )
 
 
 @app.post("/ask/stream", responses={503: {"description": "RAG chain not available"}})
@@ -312,8 +385,7 @@ def chat_endpoint(body: ChatRequest) -> ChatResponse:
     If ``session_id`` is provided, the message is appended to the existing session.
     Otherwise, a new session is created (requires ``user_id``).
 
-    Flow: write user msg → retrieve context → assemble prompt → call LLM
-          → write assistant msg → check summary trigger
+    Flow: write user msg → answer with RAGChain → write assistant msg → check summary trigger
     """
     if rag_chain is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -331,7 +403,6 @@ def chat_endpoint(body: ChatRequest) -> ChatResponse:
         )
         from src.conversation.kafka_producer import send_message_event, send_summary_event
         from src.conversation.summarizer import should_trigger_summary
-        from src.conversation.context_builder import assemble_conversation_prompt
 
         cfg_conv = get_conversation_config()
         ttl_days = int(cfg_conv.get("mysql_retention_days", 30))
@@ -370,6 +441,8 @@ def chat_endpoint(body: ChatRequest) -> ChatResponse:
         )
         send_message_event(session_id, user_msg)
         logger.info("/chat user message: session=%s, order=%d", session_id, message_order)
+    except NoBrokersAvailable as kafka_warn:
+        logger.warning("/chat: Kafka unavailable (user msg event skipped): %s", kafka_warn)
 
         # -- Step 2: warm Redis cache on miss --
         if not get_recent_messages(session_id):
@@ -377,32 +450,21 @@ def chat_endpoint(body: ChatRequest) -> ChatResponse:
             if all_msgs:
                 warm_cache(session_id, all_msgs)
 
-        # -- Step 3: retrieval --
-        top_k = body.top_k if body.top_k else rag_chain.top_k
-        chunks: list[dict[str, Any]] = []
-        try:
-            query_vector = rag_chain.embedding_client.embed_text(body.question)
-            chunks = rag_chain.milvus_client.search(query_vector=query_vector, top_k=top_k)
-            context = "\n\n---\n\n".join(
-                f"[文档{i + 1}]\n{c['text']}" for i, c in enumerate(chunks)
-            )
-        except Exception as e:
-            logger.warning("/chat retrieval failed: %s", e)
-            context = ""
-
-        # -- Step 4: assemble prompt and call LLM --
         latest_summary = get_latest_summary(session_id)
-        summary_text = latest_summary.summary_text if latest_summary else None
+        summary_text = latest_summary.summary_text if latest_summary else ""
 
-        prompt_result = assemble_conversation_prompt(
-            session_id=session_id, question=body.question, context=context,
+        # -- Step 3: answer through RAGChain (includes semantic cache) --
+        result = rag_chain.answer(
+            question=body.question,
+            session_id=session_id,
+            session_summary=summary_text,
+            user_id=session.user_id,
         )
-        answer_text = rag_chain.llm_client.generate(
-            prompt=prompt_result["user_prompt"],
-            system_prompt=rag_chain.system_prompt,
-        )
+        answer_text = result["answer"]
+        cache_hit_flag = result.get("cache_hit", False)
+        cache_hit_from = result.get("cache_hit_from")
 
-        # -- Step 5: write assistant message to Redis + Kafka --
+        # -- Step 4: write assistant message to Redis + Kafka --
         assistant_msg = Message(
             session_id=session_id, message_order=0, role=MessageRole.ASSISTANT,
             content=answer_text, metadata={"question": body.question},
@@ -413,11 +475,11 @@ def chat_endpoint(body: ChatRequest) -> ChatResponse:
         logger.info("/chat assistant reply: session=%s, order=%d, len=%d",
                     session_id, asst_order, len(answer_text))
 
-        # -- Step 6: persist to MySQL --
+        # -- Step 5: persist to MySQL --
         save_message(user_msg)
         save_message(assistant_msg)
 
-        # -- Step 7: check summary trigger --
+        # -- Step 6: check summary trigger --
         current_order = get_current_message_order(session_id)
         if should_trigger_summary(current_order, session.summary_order, interval):
             msgs_for_summary = get_session_messages(session_id)
@@ -431,7 +493,7 @@ def chat_endpoint(body: ChatRequest) -> ChatResponse:
                     summary_order=session.summary_order + 1,
                     turns_start=session.summary_order * interval + 1,
                     turns_end=current_order,
-                    previous_summary=summary_text,
+                    previous_summary=summary_text or None,
                     messages_to_summarize=[
                         {"role": m.role.value, "content": m.content}
                         for m in new_msgs
@@ -445,18 +507,22 @@ def chat_endpoint(body: ChatRequest) -> ChatResponse:
                   detail={"message_order": message_order})
 
         # -- Build sources response --
-        sources = []
-        if chunks:
-            for chunk in chunks:
-                meta = chunk.get("metadata") or {}
-                sources.append(SourceItem(
-                    text=chunk["text"][:200] + ("..." if len(chunk["text"]) > 200 else ""),
-                    metadata=meta, score=chunk.get("score"),
-                ))
+        sources = [
+            SourceItem(
+                text=(src.get("text", "")[:200] + ("..." if len(src.get("text", "")) > 200 else "")),
+                metadata=src.get("metadata", {}),
+                score=src.get("score"),
+            )
+            for src in result.get("sources", [])
+        ]
 
         return ChatResponse(
-            answer=answer_text, sources=sources,
-            session_id=session_id, message_order=asst_order,
+            answer=answer_text,
+            sources=sources,
+            session_id=session_id,
+            message_order=asst_order,
+            cache_hit=cache_hit_flag,
+            cache_hit_from=cache_hit_from,
         )
 
     except HTTPException:
@@ -549,6 +615,7 @@ def chat_stream_endpoint(body: ChatRequest):
         except Exception as e:
             logger.warning("/chat/stream retrieval failed: %s", e)
             chunks = []
+            context = ""
 
         # -- Assemble prompt --
         latest_summary = get_latest_summary(session_id)
@@ -652,6 +719,65 @@ def chat_stream_endpoint(body: ChatRequest):
 
 
 # =============================================================================
+# Semantic cache endpoints
+# =============================================================================
+
+@app.get("/cache/stats", response_model=CacheStatsResponse)
+def cache_stats() -> CacheStatsResponse:
+    semantic_cache = _get_semantic_cache()
+    stats = semantic_cache.get_stats()
+    return CacheStatsResponse(
+        total_requests=stats.total_requests,
+        cache_hits=stats.cache_hits,
+        redis_hits=stats.redis_hits,
+        milvus_hits=stats.milvus_hits,
+        context_filtered=stats.context_filtered,
+        writes=stats.writes,
+        evictions=stats.evictions,
+        last_eviction_at=stats.last_eviction_at,
+        last_reset_at=stats.last_reset_at,
+        hit_rate=stats.hit_rate(),
+        cache_size=semantic_cache.cache_size(),
+        enabled=semantic_cache.is_enabled(),
+    )
+
+
+@app.post("/cache/reset-stats", response_model=CacheStatsResponse)
+def cache_reset_stats() -> CacheStatsResponse:
+    semantic_cache = _get_semantic_cache()
+    semantic_cache.reset_stats()
+    stats = semantic_cache.get_stats()
+    return CacheStatsResponse(
+        total_requests=stats.total_requests,
+        cache_hits=stats.cache_hits,
+        redis_hits=stats.redis_hits,
+        milvus_hits=stats.milvus_hits,
+        context_filtered=stats.context_filtered,
+        writes=stats.writes,
+        evictions=stats.evictions,
+        last_eviction_at=stats.last_eviction_at,
+        last_reset_at=stats.last_reset_at,
+        hit_rate=stats.hit_rate(),
+        cache_size=semantic_cache.cache_size(),
+        enabled=semantic_cache.is_enabled(),
+    )
+
+
+@app.post("/cache/evict", response_model=CacheEvictResponse)
+def cache_evict(body: CacheEvictRequest) -> CacheEvictResponse:
+    semantic_cache = _get_semantic_cache()
+    evicted_ids = semantic_cache.evict_oldest(body.n)
+    return CacheEvictResponse(evicted_ids=evicted_ids, evicted_count=len(evicted_ids))
+
+
+@app.post("/cache/clear", response_model=CacheClearResponse)
+def cache_clear() -> CacheClearResponse:
+    semantic_cache = _get_semantic_cache()
+    deleted_count = semantic_cache.clear_all()
+    return CacheClearResponse(deleted_count=deleted_count)
+
+
+# =============================================================================
 # /conversation/* — multi-turn endpoints
 # =============================================================================
 
@@ -690,8 +816,7 @@ def create_session(body: CreateSessionRequest):
 def send_message(session_id: str, body: SendMessageRequest):
     """Send a message in a multi-turn conversation session.
 
-    Flow: write user msg -> retrieve context -> assemble prompt -> call LLM
-          -> write assistant msg -> check summary trigger
+    Flow: write user msg -> answer with RAGChain -> write assistant msg -> check summary trigger
     """
     if rag_chain is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -707,7 +832,6 @@ def send_message(session_id: str, body: SendMessageRequest):
         )
         from src.conversation.kafka_producer import send_message_event, send_summary_event
         from src.conversation.summarizer import should_trigger_summary
-        from src.conversation.context_builder import assemble_conversation_prompt
 
         # Verify session exists
         session = get_session(session_id)
@@ -736,31 +860,20 @@ def send_message(session_id: str, body: SendMessageRequest):
                 warm_cache(session_id, all_msgs)
 
         latest_summary = get_latest_summary(session_id)
-        summary_text = latest_summary.summary_text if latest_summary else None
+        summary_text = latest_summary.summary_text if latest_summary else ""
 
-        # Step 3: retrieval
-        try:
-            chunks = rag_chain.milvus_client.search(
-                query_vector=rag_chain.embedding_client.embed_text(body.content),
-                top_k=rag_chain.top_k,
-            )
-            context = "\n\n---\n\n".join(
-                f"[文档{i + 1}]\n{c['text']}" for i, c in enumerate(chunks)
-            )
-        except Exception as e:
-            logger.warning("Retrieval failed in multi-turn: %s", e)
-            context = ""
-
-        # Step 4: assemble conversation prompt and call LLM
-        prompt_result = assemble_conversation_prompt(
-            session_id=session_id, question=body.content, context=context,
+        # Step 3: answer through RAGChain
+        result = rag_chain.answer(
+            question=body.content,
+            session_id=session_id,
+            session_summary=summary_text,
+            user_id=session.user_id,
         )
-        answer_text = rag_chain.llm_client.generate(
-            prompt=prompt_result["user_prompt"],
-            system_prompt=rag_chain.system_prompt,
-        )
+        answer_text = result["answer"]
+        cache_hit_flag = result.get("cache_hit", False)
+        cache_hit_from = result.get("cache_hit_from")
 
-        # Step 5: write assistant message to Redis + Kafka
+        # Step 4: write assistant message to Redis + Kafka
         assistant_msg = Message(
             session_id=session_id, message_order=0, role=MessageRole.ASSISTANT,
             content=answer_text, metadata={"question": body.content},
@@ -771,7 +884,7 @@ def send_message(session_id: str, body: SendMessageRequest):
         logger.info("Assistant reply written: session=%s, order=%d, len=%d",
                     session_id, asst_order, len(answer_text))
 
-        # Step 6: check summary trigger
+        # Step 5: check summary trigger
         cfg2 = get_conversation_config()
         interval = int(cfg2.get("summary_interval_turns", 5))
         current_order = get_current_message_order(session_id)
@@ -788,7 +901,7 @@ def send_message(session_id: str, body: SendMessageRequest):
                     summary_order=session.summary_order + 1,
                     turns_start=session.summary_order * interval + 1,
                     turns_end=current_order,
-                    previous_summary=summary_text,
+                    previous_summary=summary_text or None,
                     messages_to_summarize=[
                         {"role": m.role.value, "content": m.content}
                         for m in new_msgs
@@ -801,19 +914,22 @@ def send_message(session_id: str, body: SendMessageRequest):
                   session_id=session_id, resource="message",
                   detail={"message_order": message_order, "role": "user"})
 
-        # Build sources response
-        sources = []
-        if chunks:
-            for chunk in chunks:
-                meta = chunk.get("metadata") or {}
-                sources.append(SourceItem(
-                    text=chunk["text"][:200] + ("..." if len(chunk["text"]) > 200 else ""),
-                    metadata=meta, score=chunk.get("score"),
-                ))
+        sources = [
+            SourceItem(
+                text=src.get("text", "")[:200] + ("..." if len(src.get("text", "")) > 200 else ""),
+                metadata=src.get("metadata", {}),
+                score=src.get("score"),
+            )
+            for src in result.get("sources", [])
+        ]
 
         return SendMessageResponse(
-            answer=answer_text, sources=sources,
-            session_id=session_id, message_order=asst_order,
+            answer=answer_text,
+            sources=sources,
+            session_id=session_id,
+            message_order=asst_order,
+            cache_hit=cache_hit_flag,
+            cache_hit_from=cache_hit_from,
         )
 
     except HTTPException:

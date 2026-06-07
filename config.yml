@@ -84,3 +84,32 @@ conversation:
   summary_llm_model: "qwen-plus"
   summary_llm_temperature: 0.1
   summary_max_tokens: 500
+
+# 语义缓存配置（Semantic Cache）
+semantic_cache:
+  enabled: true
+  # Milvus query_cache Collection 名称
+  collection_name: query_cache
+  # 语义相似度阈值（向量余弦相似度），超过此值才视为命中
+  similarity_threshold: 0.93
+  # 上下文指纹匹配阈值（Jaccard 关键词重叠），多轮场景用
+  context_threshold: 0.50
+  # 缓存过期天数（Milvus TTL）
+  ttl_days: 7
+  # 最大条目数，超出按 last_hit_at 淘汰最旧记录
+  max_entries: 10000
+  # 缓存键粒度：session（默认，安全优先）| user | question
+  #   session  — question + session_id + summary_hash（推荐）
+  #   user     — question + user_id + summary_hash（跨会话复用）
+  #   question — 仅 question（最高复用率，多轮场景慎用）
+  cache_key_scope: "session"
+  # 精确匹配一级缓存（Redis）TTL，单位秒（1小时）
+  redis_exact_ttl_seconds: 3600
+  # 是否启用精确 SHA256 匹配（Redis 一级缓存）
+  enable_exact_match: true
+  # 语义搜索返回的候选数量（top_k for Milvus cache search）
+  search_top_k: 3
+  # 答案最短长度（短于此不写入缓存，避免缓存空/错误答案）
+  min_answer_length: 20
+  # 来源列表最短条数（少于此不写入缓存）
+  min_sources_count: 0
